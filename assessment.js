@@ -1,324 +1,199 @@
 const express = require("express");
-
 const app = express();
+
 app.use(express.json());
 
-// In-memory storage. Menu items reset when the server restarts.
-let menuItems = [];
+// In-memory database
+let dishes = [];
 let nextId = 1;
 
-const categories = ["Appetizers", "Mains", "Sides", "Desserts", "Beverages"];
-const fields = [
-  "name",
-  "description",
+const CATEGORIES = [
+  "Starter",
+  "MainCourse",
+  "Dessert",
+  "Beverage",
+  "Snack",
+  "Side",
+  "Mocktail",
+  "Biryani",
+];
+
+const KNOWN_FIELDS = [
+  "dishName",
+  "restaurant",
   "category",
   "price",
+  "calories",
   "isVegetarian",
-  "isAvailable",
 ];
 
 function sendError(res, status, message) {
   return res.status(status).json({ error: message });
 }
 
-function validateMenuItem(body, partial = false) {
+// Validation logic
+function validateField(key, value) {
+  if (key === "dishName" || key === "restaurant") {
+    if (typeof value !== "string") return `${key} must be a string`;
+    const trimmed = value.trim();
+    if (trimmed.length < 2 || trimmed.length > 50) {
+      return `${key} must be between 2 and 50 characters`;
+    }
+    return { ok: true, val: trimmed };
+  }
+
+  if (key === "category") {
+    if (typeof value !== "string" || !CATEGORIES.includes(value)) {
+      return `category must be one of: ${CATEGORIES.join(", ")}`;
+    }
+    return { ok: true, val: value };
+  }
+
+  if (key === "price") {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 5000) {
+      return "price must be a number > 0 and <= 5000";
+    }
+    return { ok: true, val: Math.round(value * 100) / 100 };
+  }
+
+  if (key === "calories") {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 3000) {
+      return "calories must be an integer between 0 and 3000";
+    }
+    return { ok: true, val: value };
+  }
+
+  if (key === "isVegetarian") {
+    if (typeof value !== "boolean") {
+      return "isVegetarian must be a boolean (true or false)";
+    }
+    return { ok: true, val: value };
+  }
+
+  return { ok: false };
+}
+
+// 1. CREATE (POST /api/dishes)
+app.post("/api/dishes", (req, res) => {
+  const body = req.body;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return "Body must be a JSON object";
+    return sendError(res, 400, "Body must be a JSON object");
   }
 
-  const keys = Object.keys(body);
-  const unknownFields = keys.filter((key) => !fields.includes(key));
-
-  if (unknownFields.length > 0) {
-    return `Unknown field: ${unknownFields[0]}`;
-  }
-
-  if (partial && keys.length === 0) {
-    return "At least one field is required";
-  }
-
-  const requiredFields = partial ? keys : fields;
-
-  for (const field of requiredFields) {
-    if (!Object.hasOwn(body, field)) {
-      return `${field} is required`;
+  const cleanData = {};
+  for (const field of KNOWN_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) {
+      return sendError(res, 400, `Missing required field: ${field}`);
     }
-  }
-
-  const data = {};
-
-  for (const key of keys) {
-    const value = body[key];
-
-    if (key === "name" || key === "description") {
-      if (typeof value !== "string") {
-        return `${key} must be a string`;
-      }
-
-      data[key] = value.trim();
-
-      if (key === "name" && (data[key].length < 2 || data[key].length > 80)) {
-        return "name must be between 2 and 80 characters";
-      }
-
-      if (key === "description" && data[key].length > 500) {
-        return "description cannot exceed 500 characters";
-      }
-    } else if (key === "category") {
-      if (typeof value !== "string" || !categories.includes(value)) {
-        return `category must be one of: ${categories.join(", ")}`;
-      }
-
-      data[key] = value;
-    } else if (key === "price") {
-      if (
-        typeof value !== "number" ||
-        !Number.isFinite(value) ||
-        value <= 0 ||
-        value > 100000
-      ) {
-        return "price must be greater than 0 and at most 100000";
-      }
-
-      data[key] = Math.round(value * 100) / 100;
-    } else if (key === "isVegetarian" || key === "isAvailable") {
-      if (typeof value !== "boolean") {
-        return `${key} must be a boolean`;
-      }
-
-      data[key] = value;
+    const check = validateField(field, body[field]);
+    if (typeof check === "string") {
+      return sendError(res, 400, check);
     }
+    cleanData[field] = check.val;
   }
 
-  return data;
-}
-
-function findMenuItem(id) {
-  return menuItems.find((item) => String(item.id) === id);
-}
-
-// Create a menu item.
-app.post("/api/menu", (req, res) => {
-  const data = validateMenuItem(req.body);
-
-  if (typeof data === "string") {
-    return sendError(res, 400, data);
+  // Uniqueness check: (dishName + restaurant)
+  const exists = dishes.some(
+    (d) =>
+      d.dishName.toLowerCase() === cleanData.dishName.toLowerCase() &&
+      d.restaurant.toLowerCase() === cleanData.restaurant.toLowerCase()
+  );
+  if (exists) {
+    return sendError(res, 400, "A dish with this name and restaurant already exists");
   }
 
-  const menuItem = { id: nextId++, ...data };
-  menuItems.push(menuItem);
-
-  return res.status(201).json(menuItem);
+  const newDish = { id: nextId++, ...cleanData };
+  dishes.push(newDish);
+  return res.status(201).json(newDish);
 });
 
-// List, search, filter, sort, and paginate menu items.
-app.get("/api/menu", (req, res) => {
+// 2. LIST (GET /api/dishes)
+app.get("/api/dishes", (req, res) => {
   const query = req.query;
-  let { page = "1", limit = "10" } = query;
 
-  if (!/^[1-9]\d*$/.test(page) || !/^[1-9]\d*$/.test(limit)) {
-    return sendError(res, 400, "page and limit must be positive integers");
+  let page = query.page !== undefined ? query.page : "1";
+  let limit = query.limit !== undefined ? query.limit : "10";
+
+  if (!/^[1-9]\d*$/.test(String(page))) {
+    return sendError(res, 400, "page must be a positive integer");
+  }
+  if (!/^[1-9]\d*$/.test(String(limit))) {
+    return sendError(res, 400, "limit must be a positive integer");
   }
 
   page = Number(page);
   limit = Number(limit);
 
-  if (limit > 100) {
-    return sendError(res, 400, "limit cannot exceed 100");
+  if (limit > 50) {
+    return sendError(res, 400, "limit cannot exceed 50");
   }
 
-  if (query.category !== undefined && !categories.includes(query.category)) {
-    return sendError(
-      res,
-      400,
-      `category must be one of: ${categories.join(", ")}`
-    );
+  if (query.category !== undefined && !CATEGORIES.includes(query.category)) {
+    return sendError(res, 400, "Invalid category filter");
   }
 
-  for (const key of ["isVegetarian", "isAvailable"]) {
-    if (
-      query[key] !== undefined &&
-      !["true", "false"].includes(query[key])
-    ) {
-      return sendError(res, 400, `${key} must be true or false`);
-    }
+  if (query.isVegetarian !== undefined && !["true", "false"].includes(query.isVegetarian)) {
+    return sendError(res, 400, "isVegetarian must be true or false");
   }
 
   for (const key of ["minPrice", "maxPrice"]) {
-    if (
-      query[key] !== undefined &&
-      (query[key].trim() === "" ||
-        !Number.isFinite(Number(query[key])) ||
-        Number(query[key]) < 0)
-    ) {
-      return sendError(res, 400, `${key} must be a non-negative number`);
+    if (query[key] !== undefined) {
+      const num = Number(query[key]);
+      if (query[key].trim?.() === "" || !Number.isFinite(num) || num < 0) {
+        return sendError(res, 400, `${key} must be a non-negative number`);
+      }
     }
   }
 
   if (
-    query.sort !== undefined &&
-    !["name", "price", "category"].includes(query.sort)
+    query.minPrice !== undefined &&
+    query.maxPrice !== undefined &&
+    Number(query.minPrice) > Number(query.maxPrice)
   ) {
-    return sendError(res, 400, "sort must be name, price, or category");
+    return sendError(res, 400, "minPrice cannot be greater than maxPrice");
+  }
+
+  if (query.sort !== undefined && !["dishName", "price", "calories"].includes(query.sort)) {
+    return sendError(res, 400, "sort must be dishName, price, or calories");
   }
 
   const order = query.order ?? "asc";
-
   if (!["asc", "desc"].includes(order)) {
     return sendError(res, 400, "order must be asc or desc");
   }
 
-  let result = [...menuItems];
+  // Filtering
+  let result = [...dishes];
 
   if (query.category !== undefined) {
-    result = result.filter((item) => item.category === query.category);
+    result = result.filter((d) => d.category === query.category);
   }
 
-  for (const key of ["isVegetarian", "isAvailable"]) {
-    if (query[key] !== undefined) {
-      const value = query[key] === "true";
-      result = result.filter((item) => item[key] === value);
-    }
+  if (query.isVegetarian !== undefined) {
+    const isVeg = query.isVegetarian === "true";
+    result = result.filter((d) => d.isVegetarian === isVeg);
   }
 
   if (query.minPrice !== undefined) {
-    result = result.filter((item) => item.price >= Number(query.minPrice));
+    result = result.filter((d) => d.price >= Number(query.minPrice));
   }
 
   if (query.maxPrice !== undefined) {
-    result = result.filter((item) => item.price <= Number(query.maxPrice));
+    result = result.filter((d) => d.price <= Number(query.maxPrice));
   }
 
-  if (query.search) {
+  if (query.search && query.search.trim() !== "") {
     const term = query.search.trim().toLowerCase();
-
     result = result.filter(
-      (item) =>
-        item.name.toLowerCase().includes(term) ||
-        item.description.toLowerCase().includes(term)
+      (d) =>
+        d.dishName.toLowerCase().includes(term) ||
+        d.restaurant.toLowerCase().includes(term)
     );
   }
 
+  // Sorting (Default is insertion order if no sort is specified)
   if (query.sort) {
-    const direction = order === "asc" ? 1 : -1;
-
+    const dir = order === "asc" ? 1 : -1;
     result.sort((a, b) => {
-      const left =
-        typeof a[query.sort] === "string"
-          ? a[query.sort].toLowerCase()
-          : a[query.sort];
-
-      const right =
-        typeof b[query.sort] === "string"
-          ? b[query.sort].toLowerCase()
-          : b[query.sort];
-
-      if (left < right) return -direction;
-      if (left > right) return direction;
-      return 0;
-    });
-  }
-
-  const total = result.length;
-  const totalPages = Math.ceil(total / limit);
-  const start = (page - 1) * limit;
-
-  return res.json({
-    data: result.slice(start, start + limit),
-    page,
-    limit,
-    total,
-    totalPages,
-  });
-});
-
-// Get one menu item.
-app.get("/api/menu/:id", (req, res) => {
-  const menuItem = findMenuItem(req.params.id);
-
-  if (!menuItem) {
-    return sendError(res, 404, "Menu item not found");
-  }
-
-  return res.json(menuItem);
-});
-
-// Replace a menu item.
-app.put("/api/menu/:id", (req, res) => {
-  const index = menuItems.findIndex(
-    (item) => String(item.id) === req.params.id
-  );
-
-  if (index === -1) {
-    return sendError(res, 404, "Menu item not found");
-  }
-
-  const data = validateMenuItem(req.body);
-
-  if (typeof data === "string") {
-    return sendError(res, 400, data);
-  }
-
-  menuItems[index] = { id: menuItems[index].id, ...data };
-
-  return res.json(menuItems[index]);
-});
-
-// Update selected fields on a menu item.
-app.patch("/api/menu/:id", (req, res) => {
-  const index = menuItems.findIndex(
-    (item) => String(item.id) === req.params.id
-  );
-
-  if (index === -1) {
-    return sendError(res, 404, "Menu item not found");
-  }
-
-  const data = validateMenuItem(req.body, true);
-
-  if (typeof data === "string") {
-    return sendError(res, 400, data);
-  }
-
-  menuItems[index] = {
-    ...menuItems[index],
-    ...data,
-    id: menuItems[index].id,
-  };
-
-  return res.json(menuItems[index]);
-});
-
-// Delete a menu item.
-app.delete("/api/menu/:id", (req, res) => {
-  const index = menuItems.findIndex(
-    (item) => String(item.id) === req.params.id
-  );
-
-  if (index === -1) {
-    return sendError(res, 404, "Menu item not found");
-  }
-
-  menuItems.splice(index, 1);
-  return res.status(204).end();
-});
-
-// Handle malformed JSON and other server errors.
-app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return sendError(res, 400, "Malformed JSON");
-  }
-
-  return sendError(res, 500, "Internal server error");
-});
-
-// Handle unknown routes.
-app.use((req, res) => {
-  return sendError(res, 404, "Route not found");
-});
-
-const PORT = process.env.PORT || 8080;
-
-app.listen(PORT, () => {
-  console.log(`Restaurant menu API listening on port ${PORT}`);
-});
+      const vA = typeof a[query.sort] === "string" ? a[query.sort].toLowerCase() : a[query.sort];
+      const vB = typeof b[query.sort] === "string
